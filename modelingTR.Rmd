@@ -1,0 +1,90 @@
+---
+title: "Modeling traveling ratio"
+output: html_notebook
+---
+
+The read counts of RNAP2 ChIL-seq at TSS- and TES-region were fitted to the following Poisson regression model. The model can evaluate mean, variance and thus confidence intervals of traveling ratio by utilizing all (five) replicates that have different total sequenced reads.
+
+For each gene, assume read count $y_{ij}$ of $i$-th replicate at side $j$ (TSS, TES) follows a Poisson distribution, and the mean $\lambda_{ij}$ satisfies the relation:
+
+$$
+\begin{aligned}
+\lambda_{ij}/M_i &= \exp(\beta_0+\beta_1 s_{ij})\\
+\log\lambda_{ij} &= \log M_i + \beta_0 + \beta_1 s_{ij}
+\end{aligned}
+$$
+, where the offset term $M_i$ is the total reads (in million) of replicate $i$ and $s_{ij}$ is the indicator variable that the read count $y_{ij}$ is either from TSS ($s_{ij}=0$) or TES ($s_{ij}=1$). Since the offsetting $\lambda_{ij}/M_i$ is equivalent to CPM normalization of the mean count, $e^{\beta_0}$ and $e^{\beta_1}$ can be reffered to as the expected CPM at TSS and the travaling ratio (TES/TSS) of the gene, respectively.
+
+*Below is an example of using the Poisson regression model to decompose transcriptional activation and population-size effect in bulk tissue epigenome.*
+
+### Load packages
+
+```{r setup}
+library(dplyr)
+library(purrr)
+library(tidyr)
+```
+
+### Load TSS- and TES-counts of the example transcripts
+
+The example data of time-course RNAP2 ChIL-seq data of injured muscle.
+
+```{r loadChIL, cache=TRUE}
+tbl <- readr::read_tsv("sampleCountsTSSTES.txt.gz",col_types="cccccciii")
+sample_n(tbl,10)
+```
+
+The table is already annotated as above.
+
+### Fitting to GLM and formatting tables
+
+The offset term is equipped by `offset=log(total/1e6)`.
+
+```{r fitModel}
+res <- tbl %>%
+  pivot_longer(c(tss,tes),names_to="site",values_to="y") %>%
+  mutate(site=factor(site,c("tss","tes"))) %>% 
+  arrange(ens_tran) %>% group_by(ens_tran,cell,day) %>% nest() %>%
+  mutate(model=map(data,~
+    glm(y~site,family=poisson,offset=log(total/1e6),data=.x))
+  ) %>% ungroup
+```
+
+Formatting tables and the base change.
+
+```{r reformat}
+tbl.pois <- res %>%
+  mutate(brm=map(model,broom::tidy,conf.int=TRUE)) %>%
+  select(-data,-model) %>% unnest(brm) %>%
+  mutate_at(
+    vars(estimate,std.error,conf.low,conf.high),
+    ~./log(2)
+  ) %>% mutate(
+    term=sub("\\(Intercept\\)","log2TSS",term),
+    term=sub("sitetes","log2TR",term),
+    day=factor(day,paste0("Day",c(0,3,5,7,14)))
+  )
+```
+
+### Calculation of the contrasts: DayX/Day0
+
+```{r contrasts}
+tbl.day0 <- tbl.pois %>% filter(day=="Day0") %>%
+  select(ens_tran,term,estimate0=estimate,std.error0=std.error)
+
+tbl.conta <- tbl.pois %>% 
+  filter(day!="Day0") %>% inner_join(tbl.day0) %>% 
+  transmute(
+    ens_tran,
+    cell,
+    day,
+    term,
+    log2FC = estimate-estimate0,
+    se = sqrt(std.error^2+std.error0^2),
+    stat = log2FC/se,
+    p.value = 2*pnorm(abs(stat),lower.tail=FALSE),
+  ) %>% group_by(term) %>%
+  mutate(p.adj = p.adjust(p.value,method="BH")) %>%
+  ungroup %>% annotate
+```
+
