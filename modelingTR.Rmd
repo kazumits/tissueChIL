@@ -85,6 +85,6 @@ tbl.conta <- tbl.pois %>%
     p.value = 2*pnorm(abs(stat),lower.tail=FALSE),
   ) %>% group_by(term) %>%
   mutate(p.adj = p.adjust(p.value,method="BH")) %>%
-  ungroup %>% annotate
+  ungroup
 ```
 
